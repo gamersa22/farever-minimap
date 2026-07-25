@@ -72,7 +72,10 @@ farever.player.in_combat()                  -- the game's in-combat flag
 farever.player.combat_start()               -- game-time when combat began
 farever.player.has_target()                 -- true if Hero.target is non-zero
 
--- Progression
+-- Identity and progression
+farever.player.name()                       -- character name ("" until loaded)
+farever.player.class()                      -- "Rogue" / "Mage" / "Priest" / "Warrior" (v1.1.8+; "" until loaded)
+farever.player.uid()                        -- stable account id, e.g. "S5a690f03" (v1.1.8+); constant across sessions
 farever.player.level()                      -- character level
 
 -- Health and energy
@@ -80,7 +83,8 @@ farever.player.health()                     -- current HP
 farever.player.max_health()                 -- max HP
 farever.player.health_pct()                 -- health / max_health, 0.0 .. 1.0
 farever.player.health_regen()               -- HP regen rate
-farever.player.shield()                     -- shield value
+farever.player.shield()                     -- live total absorb, summed from
+                                            -- active statuses (v1.1.4+)
 farever.player.energy()                     -- special energy pool
 farever.player.energy_regen()               -- special energy regen rate
 
@@ -130,6 +134,20 @@ farever.player.damage_taken_modifier()      -- incoming damage scale
 farever.player.heal_given_multiplier()
 farever.player.shield_power_multiplier()
 farever.player.glide_speed()
+
+-- Player codex lookup (v0.6.1+). Takes a Unit.kind id (exactly what
+-- farever.target.name() returns) and reports your bestiary completion
+-- for that monster. Returns nil if the codex isn't loaded yet OR the id
+-- isn't a codex monster; otherwise a table:
+--   { state    = "unknown" | "partial" | "complete",
+--     completed = bool,    -- authoritative; can be true below max
+--     progress  = int,     -- completionProgress (running counter)
+--     max       = int,     -- maxProgress
+--     name      = string,  -- localized display name ("Wolf")
+--     path      = string } -- codex tree path
+farever.player.codex(kind)
+-- e.g.  local c = farever.player.codex(farever.target.name())
+--       if c and c.state == "complete" then ... end
 
 -- DPS meter snapshot
 farever.dps.current()                       -- current pull's DPS (float)
@@ -186,11 +204,13 @@ for i, it in ipairs(items) do
 end
 
 -- Active statuses / buffs (v0.5.6+). Walks Unit.instigatedStatuses.
--- Each entry is { kind, duration, stacks }. Plugins compute remaining
--- time client-side from farever.now() if they want a countdown.
+-- Each entry is { kind, duration, stacks, shield_amount }. shield_amount
+-- (v1.1.4+) is the live absorb that status grants, 0 for non-shield ones;
+-- sum them for your total shield. Plugins compute remaining time
+-- client-side from farever.now() if they want a countdown.
 local buffs = farever.player.statuses()
 for i, s in ipairs(buffs) do
-    print(i, s.kind, s.duration, s.stacks)
+    print(i, s.kind, s.duration, s.stacks, s.shield_amount)
 end
 ```
 
@@ -199,10 +219,142 @@ moment you ask. They never block. If the mod has not identified your
 character yet (`locked()` returns false) the resource and defense
 readers return 0 so plugin code can use them unconditionally.
 
+### The character sheet (v1.1.5+)
+
+The displayed stat values (the ones with gear, buffs and talents folded
+in) are not stored on the character; the client computes them for the
+character menu. The mod reads that menu, so `stats()` fills in after you
+have opened the character sheet once per session.
+
+```lua
+-- Full sheet, language- and class-agnostic. Each entry is
+-- { name = "Vitality", value = 124.0, text = "124" }. `name` is
+-- canonical for the five primaries, otherwise the localized label.
+for _, s in ipairs(farever.player.stats()) do
+    print(s.name, s.value, s.text)
+end
+```
+
+The typed getters (`vitality()`, `crit_chance()`, ...) give the same
+numbers for the primaries and max health. The remaining secondary
+getters still report the engine's base value, so prefer `stats()` when
+you want what the character sheet shows.
+
+### Equipment slots, bag and currencies
+
+```lua
+-- Equipped gear entries also carry slot / slot_name (v1.2.1+).
+-- slot_name is one of Weapon1, Weapon2, OffhandWeapon, Head, Neck,
+-- Shoulders, Chest, Back, Hands, Waist, Legs, Feet, FingerLeft, Trinket,
+-- FingerRight, Pickaxe, Sickle ("" for the unnamed bag / mount slots),
+-- so the two rings can finally be told apart.
+for _, it in ipairs(farever.player.equipment()) do
+    print(it.slot, it.slot_name, it.kind, it.level, it.upgrade)
+end
+
+-- Bag inventory (v1.2.1+; stacks and materials since v1.2.3).
+-- { kind, level, upgrade, stack }. Holds gear AND stackable consumables
+-- and crafting materials, so a drop tracker reads counts straight off it.
+for _, it in ipairs(farever.player.inventory()) do
+    print(it.kind, it.stack)          -- "LavendulaPetal  10"
+end
+
+-- Currencies (v1.2.3+). { kind, amount }. Gold and the like; crafting
+-- materials are items and live in inventory() above.
+for _, c in ipairs(farever.player.currencies()) do
+    print(c.kind, c.amount)           -- "Gold  10433"
+end
+```
+
+Both lists refresh at about 1 Hz.
+
+### Skills and cooldowns (v1.2.1+ / v1.2.3+)
+
+```lua
+-- Arsenal / weapon skills in slot order (v1.2.1+).
+-- { slot, kind, icon }  -- icon since v1.2.4, see below.
+for _, s in ipairs(farever.player.weapon_skills()) do
+    print(s.slot, s.kind)
+end
+
+-- Every skill the mod has resolved this session, with cooldowns
+-- (v1.2.3+). { kind, cooldown, base_cooldown, charges, icon }
+-- `cooldown` is the effective value the game uses (all reductions
+-- applied), `base_cooldown` the unmodified one, so
+-- 1 - cooldown / base_cooldown is that skill's total reduction.
+for _, s in ipairs(farever.player.skills()) do
+    print(s.kind, s.cooldown, s.base_cooldown, s.charges)
+end
+
+-- Global (gear) cooldown reduction, derived from the above, 0.0 .. 1.0.
+farever.player.cooldown_reduction()
+```
+
+Skills populate as they resolve, which happens while you fight, so an
+empty list right after login is normal.
+
+### Skill icons (v1.2.4+)
+
+The mod ships the game's own icon atlases and can draw a skill's icon
+straight into your window.
+
+```lua
+-- Draw it. Returns false when the icon has not resolved yet, so you
+-- can fall back to text.
+if not imgui.icon("Mage_RayOfSpark", 24) then
+    imgui.text("Mage_RayOfSpark")
+end
+
+-- Or read where it lives and draw it yourself / export it.
+local ic = farever.icons.skill("Mage_RayOfSpark")
+-- ic = { atlas = "atlas_class_Mage_96PX.png",
+--        x = 0, y = 0,          -- cell indices in that atlas
+--        size = 96,             -- cell edge in px
+--        width = 1, height = 1, -- how many cells the icon spans
+--        px = 0, py = 0,        -- the same rectangle in pixels
+--        w = 96, h = 96 }
+-- nil when the skill has not resolved yet.
+
+-- Raw form, for a cell you already know:
+imgui.atlas_icon("atlas_class_Mage_96PX.png", 0, 0, 96, 24)
+```
+
+The atlases sit in `data/atlases/UI/icons/` next to the mod, and the
+same `icon` table is attached to every entry of `player.skills()` and
+`player.weapon_skills()`. An icon resolves the first time the mod reads
+that skill's record, which happens during combat, so expect `nil` /
+`false` for a skill you have not used yet this session.
+
+### Party
+
+```lua
+farever.party.is_in_party()      -- true when you are grouped
+farever.party.count()            -- number of OTHER members (you are not in it)
+-- { name, class, uid, x, y, z, rot_z, health, max_health,
+--   attr_ok, hero_valid }
+-- attr_ok is false while a member's attributes have not replicated yet,
+-- so health / max_health are only meaningful when it is true.
+for _, m in ipairs(farever.party.list()) do
+    print(m.name, m.class, m.health, m.max_health)
+end
+```
+
+### Compass
+
+```lua
+farever.compass.is_visible()
+farever.compass.radius()               -- in metres
+farever.compass.cardinals_on()
+-- add_marker(x, y [, { z, name, color, icon, ttl }]) -> handle
+-- Same color / icon names as the waypoints above.
+local h = farever.compass.add_marker(x, y, { name = "Add here", ttl = 30 })
+farever.compass.remove_marker(h)
+```
+
 ### POI list (v0.5.6.1+)
 
 `farever.pois()` returns the full POI table the mod loaded at boot
-from `data/pois_<world>.json` (~1082 entries on W1_Siagarta) as a
+from `data/pois_<world>.json` (~1224 entries on W1_Siagarta) as a
 Lua array of tables. One snapshot per call, plugin authors filter
 by `kind` themselves.
 
@@ -221,6 +373,49 @@ end
 Replaces the pattern of hardcoding POI coordinates in your plugin.
 When the mod loads a different world or the json gets updated, your
 plugin sees the new data on next read with no code change.
+
+### User waypoints (v1.0.0-beta4+, styling v1.0.0-beta5+)
+
+`farever.waypoints` manages personal waypoints drawn on the built-in
+minimap. They persist per world in `data/user_waypoints_<world>.json`
+and survive restarts. Players can also add / rename / delete them
+in-game by right-clicking the minimap; this API lets a plugin manage
+the same set.
+
+```lua
+-- Add a waypoint at world (x, y[, z]) with an optional name and an
+-- optional opts table for color + icon. Returns the new integer id,
+-- or nil if the store is full (256 max).
+local id = farever.waypoints.add(farever.player.x(), farever.player.y(),
+                                 farever.player.z(), "Farm spot",
+                                 { color = "orange", icon = "diamond" })
+
+-- Change a waypoint's color and / or icon later. Each field optional;
+-- nil leaves the current value unchanged. Returns true on success,
+-- false if no waypoint has that id. Raises on unknown name string.
+farever.waypoints.set_style(id, { color = "red", icon = "!" })
+
+-- List all waypoints as an array of tables.
+for _, w in ipairs(farever.waypoints.list()) do
+    -- w.id            integer, stable for the session
+    -- w.name          display label (shown on hover)
+    -- w.x, w.y, w.z   world coordinates (float)
+    -- w.color         color name string (see palette below)
+    -- w.icon          icon name string  (see set below)
+end
+
+-- Remove by id. Returns true if a waypoint was removed.
+farever.waypoints.remove(id)
+```
+
+`z` defaults to 0 and the name defaults to `"Waypoint"` when omitted.
+Renaming is still in-game only for now (right-click a waypoint pin).
+
+**Palette** (case-sensitive strings, 8 options, default `"cyan"`):
+`cyan`, `red`, `orange`, `yellow`, `green`, `blue`, `magenta`, `white`.
+
+**Icon set** (default `"pin"`):
+`pin`, `flag`, `star`, `diamond`, `circle`, `exclamation` (alias `"!"`).
 
 > **Foes API note.** v0.5.3.1 shipped a `farever.foes.*` table for
 > tracking *every* mob in range. It was the source of a crash a few
@@ -250,6 +445,26 @@ function on_event(name, data)
         -- data.amount   (number)
         -- data.is_crit  (boolean)
         -- data.is_kill  (boolean)
+        -- data.target   (string, v1.1.8+) the victim's name, the same value
+        --                farever.target.name() gives, captured at the hit so
+        --                you do not have to read the target separately
+        -- data.blocked  (number, v1.1.8+) the blocked portion of the hit
+        --                (DamageResult._block); 0 when nothing was blocked
+
+    elseif name == "heal_dealt" then
+        -- (v1.1.2+) A heal you dealt (your own heals only).
+        -- data.skill    (string)
+        -- data.amount   (number, amount healed)
+        -- data.is_crit  (boolean)
+        -- data.target   (string, v1.1.8+) the heal recipient's name
+
+    elseif name == "shield_applied" then
+        -- (v1.1.4+) You gained or refreshed a shield. Fires on every
+        -- (re)cast that raises your total active-status absorb, in or
+        -- out of combat.
+        -- data.skill    (string, the status that granted it, e.g.
+        --                "Mage_ShieldOfSpark_Status")
+        -- data.amount   (number, your total active shield afterwards)
 
     elseif name == "fight_end" then
         -- data.fight_id     (integer)
@@ -325,6 +540,9 @@ imgui.progress(0.7, "70 percent")
 imgui.separator()
 imgui.spacing()
 imgui.same_line()
+
+-- The game's own skill icon (v1.2.4+), see "Skill icons" above.
+imgui.icon("Mage_RayOfSpark", 24)
 ```
 
 If you do not store the returned values back into your locals, the
@@ -391,6 +609,33 @@ it back on read.
 
 `set` writes the file immediately, so you do not lose state when
 the game crashes.
+
+## Combat logs (v1.1.7+)
+
+The sandbox blocks `io`, so a plugin cannot write arbitrary files. If you
+need to emit a log file an external tool can pick up (for example a
+FareverLogs.com combat log), use the controlled writer:
+
+```lua
+local path, err = farever.write_combatlog(filename, contents)
+```
+
+It writes `contents` (a string you build, e.g. JSON) atomically into one
+fixed folder, `%LOCALAPPDATA%\farever-minimap\combatlogs\`. The `filename`
+must be a single safe component (`A-Za-z0-9._-`, 1..128 chars, no path
+separators or `..`), so a plugin can never escape that folder. There is a
+4 MiB per-call cap. On success it returns the full path; on failure it
+returns `nil` plus an error string.
+
+```lua
+local name = string.format("%d-%s.json", os_epoch, run_id)
+local path, err = farever.write_combatlog(name, json_text)
+if not path then farever.toast("combat log failed: " .. err) end
+```
+
+Pair this with the `damage_dealt` / `heal_dealt` events (which carry
+`target` and the local player's `farever.player.uid()`) to build a log
+keyed to a player and their targets.
 
 ## Toasts
 
