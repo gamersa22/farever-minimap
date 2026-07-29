@@ -326,7 +326,7 @@ function on_render()
 			
 			-- High-contrast Emerald Green highlight for mobs >= 85% complete
 			imgui.same_line()
-			if pct >= 0.70 then
+			if expMode and pct >= .70 or pct >= .85 then
 				make_color_text(fontColor.lightGreen, string.format(" -  %d / %d", prog, max_v))
 			else
 				make_color_text({.7}, string.format(" -  %d / %d", prog, max_v))
