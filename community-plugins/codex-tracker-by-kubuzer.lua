@@ -4,7 +4,7 @@
 -- Tested against farever-mod v1.2.4
 -- License: MIT
 --
--- Target Codex & Bestiary completion assistant with current-zone prioritization, auto-updating minimap encounter waypoints, and compact UI.
+-- Target Codex & Bestiary completion assistant with current / zone prioritization, auto-updating minimap encounter waypoints, and compact UI.
 -- ==============================================================
 
 local discovered_set = {}
@@ -16,6 +16,8 @@ local is_dirty = false
 local last_save_time = 0
 local last_cache_update = 0
 local current_zone_prefix = ""
+local last_wp_kind, last_wp_x, last_wp_y = nil, 0, 0
+
 local expMode = false
 --amount needed to get the exp
 local minFound={[1]=1,[10]=4,[20]=8}
@@ -29,11 +31,12 @@ orange={r=1,g=.75,b=.3},
 }
 function on_init()
 	if farever and farever.store then
+		--[[
 		local saved_str = farever.store.get("discovered_mobs", "")
 		for k in string.gmatch(saved_str, "([^,]+)") do
 			discovered_set[k] = true
 		end
-
+		--]]
 		local saved_lvls = farever.store.get("mob_levels_json", "")
 		for pair in string.gmatch(saved_lvls, "([^;]+)") do
 			local k, lvl = string.match(pair, "([^:]+):(%d+)")
@@ -50,11 +53,12 @@ local function flush_store_if_dirty(now)
 	if (now - last_save_time) < 5.0 then return end
 	if not (farever and farever.store) then return end
 	local list = {}
+	--[[
 	for k, _ in pairs(discovered_set) do
 			table.insert(list, k)
 	end
 	farever.store.set("discovered_mobs", table.concat(list, ","))
-
+--]]
 	local lvl_list = {}
 	for k, lvl in pairs(mob_levels) do
 		table.insert(lvl_list, k .. ":" .. tostring(lvl))
@@ -103,10 +107,10 @@ end
 
 local function register_mob(mob_id)
 	if not mob_id or mob_id == "" or not farever.player.codex(mob_id) then return end
-	if not discovered_set[mob_id] then
+	--[[if not discovered_set[mob_id] then
 		discovered_set[mob_id] = true
 		is_dirty = true
-	end
+	end--]]
 
 	if farever and farever.target and farever.target.exists() then
 		local lvl = farever.target.level()
@@ -153,10 +157,11 @@ local function rebuild_incomplete_cache()
 
 	total_tracked_count = 0
 
-	for kind, _ in pairs(discovered_set) do
+	for i, e in ipairs(farever.player.codex_list()) do
 		total_tracked_count = total_tracked_count + 1
-		local info = farever.player.codex(kind)
+		local info = e
 		if info then
+			local kind = info.kind
 			if info.completed or info.state == "complete" or expMode and (minFound[info.max] <= info.progress) then
 				-- Auto-remove waypoint if completed 100%
 				local display_name = info.name or kind
@@ -179,13 +184,14 @@ local function rebuild_incomplete_cache()
 	table.sort(incomplete_cache, function(a, b)
 		local a_in_zone = (current_zone_prefix ~= "" and a.zone == current_zone_prefix)
 		local b_in_zone = (current_zone_prefix ~= "" and b.zone == current_zone_prefix)
-
+		
 		if a_in_zone ~= b_in_zone then
 			return a_in_zone
 		end
 		if a.level ~= b.level then
 			return a.level < b.level
 		end
+		
 		if a.path ~= b.path then
 			return a.path < b.path
 		end
@@ -194,11 +200,16 @@ local function rebuild_incomplete_cache()
 		return name_a < name_b
 	end)
 end
-
+function on_settings()
+	imgui.text("Setting to make show the")
+	imgui.text("amount need to get exp") 
+	if expMode ~= imgui.checkbox("Min Need", expMode) then 
+		expMode=not expMode 
+		farever.store.set("expModeState", expMode) 
+	end
+end
 function on_render()
-	if expMode ~= imgui.checkbox("Min Need", expMode) then expMode=not expMode farever.store.set("expModeState", expMode) end
-
-	local now = os.clock()
+	local now = farever.now()
 	flush_store_if_dirty(now)
 
 	if is_dirty or (now - last_cache_update) > 0.5 then
@@ -252,7 +263,11 @@ function on_render()
 
 					-- Update/overwrite waypoint with the LAST-SEEN coordinates of the mob
 					local tx, ty, tz = farever.target.x(), farever.target.y(), farever.target.z()
-					update_waypoint_for_mob(display_name, current_target_kind, tx, ty, tz)
+					local moved = math.abs(tx - last_wp_x) > 2.0 or math.abs(ty - last_wp_y) > 2.0
+					if current_target_kind ~= last_wp_kind or moved then
+						update_waypoint_for_mob(display_name, current_target_kind, tx, ty, tz)
+						last_wp_kind, last_wp_x, last_wp_y = current_target_kind, tx, ty
+					end
 				end
 
 				-- Target Health Bar
@@ -310,12 +325,18 @@ function on_render()
 			make_color_text({.65}, "Explore zones and battle mobs to build your Bestiary tracker.")
 		end
 	else
+		local currentZone=filtered_list[1].zone
 		for i = 1, math.min(#filtered_list, display_limit) do
 			local entry = filtered_list[i]
 			local info = entry.info
 			local name = info.name or entry.kind
 			if name == "" then name = entry.kind end
-
+			if currentZone ~= entry.zone then
+				 currentZone = entry.zone
+				--imgui.spacing()
+				imgui.separator()
+				--imgui.spacing()
+			end
 			local prog = info.progress or 0
 			local max_v = expMode and minFound[info.max or 1] or (info.max or 1)
 			if max_v <= 0 then max_v = 1 end
